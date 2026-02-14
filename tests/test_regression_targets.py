@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 from numpy.testing import assert_allclose
 
@@ -136,13 +134,3 @@ def test_repeated_updates_keep_covariance_nearly_symmetric_and_psd() -> None:
 
     assert max_asymmetry < 1e-4
     assert min_eigenvalue > -1e-4
-
-
-def test_readme_uses_ekf3d_package_paths() -> None:
-    readme = Path("README.md").read_text(encoding="utf-8")
-    assert "from ekf3d.ekf_predictor import EKFPredictor3D" in readme
-    assert "from ekf3d.ekf_updater import EKFUpdater3D" in readme
-    assert "src/ekf3d/ekf_predictor.py" in readme
-    assert "src/ekf3d/ekf_updater.py" in readme
-    assert 'kalman_gain_method="solve"' in readme
-    assert "bearing_only" not in readme

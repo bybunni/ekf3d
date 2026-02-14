@@ -125,7 +125,7 @@ The `mapping` parameter `(0, 2, 4)` tells the measurement model which indices ar
   │              │    │  Model        │         |
   └──────┬───────┘    └───────┬───────┘         |
          │                    │                 │
-         │  x_pred, P_pred    │  h(x), H(x)    │  z
+         │  x_pred, P_pred    │  h(x), H(x)     │  z
          │                    │                 │
          └────────────┬───────┘                 │
                       │                         │
@@ -282,6 +282,14 @@ x_post, P_post = updater.update(
 
 ## Minimal Integration Example
 
+Run the complete runnable example:
+
+```bash
+uv run python scripts/integration_example.py --steps 15 --dt-s 1.0
+```
+
+Core integration loop (same flow used in `scripts/integration_example.py`):
+
 ```python
 import numpy as np
 from ekf3d.ekf_predictor import EKFPredictor3D
@@ -313,21 +321,24 @@ P = np.eye(6) * 100.0  # large initial uncertainty
 # Each iteration the ownship has maneuvered to a new position.
 # sensor_pos comes from your navigation solution (INS/GPS).
 # azimuth/elevation come from the sensor measurement.
-for azimuth, elevation, sensor_pos in your_measurement_source:
-    # Predict target state forward (skip on first iteration to use prior directly)
+for azimuth, elevation, sensor_pos, sensor_rot in your_measurement_source:
+    # 2) Predict + update using current measurement and sensor pose
     x, P = predictor.predict(x, P, dt)
-
-    # Update with measurement from the sensor's current position
     z = np.array([azimuth, elevation])
     x, P = updater.update(
         x,
         P,
         z,
         sensor_position=sensor_pos,
+        sensor_rotation=sensor_rot,
         kalman_gain_method="solve",  # optional; default is "inv"
     )
 
-    # x now holds the best estimate of the TARGET state, not the ownship
+    # 3) Read estimated target position and velocity
+    est_position = x[[0, 2, 4]]  # [x, y, z]
+    est_velocity = x[[1, 3, 5]]  # [vx, vy, vz]
+
+    # 4) Continue to next measurement
 ```
 
 ## Files to Extract
