@@ -71,6 +71,8 @@ class AzimuthElevationMeasurementModel:
     for consistency with our 2D convention where bearing is the primary measurement.
     """
 
+    _MIN_DENOMINATOR = 1e-12
+
     def __init__(
         self,
         noise_covariance: NDArray[np.float64],
@@ -163,10 +165,11 @@ class AzimuthElevationMeasurementModel:
 
         # Compute range
         r = np.sqrt(x_rot**2 + y_rot**2 + z_rot**2)
+        r_safe = max(r, self._MIN_DENOMINATOR)
 
         # Compute azimuth and elevation
         azimuth = np.arctan2(y_rot, x_rot)
-        elevation = np.arcsin(np.clip(z_rot / r, -1.0, 1.0))
+        elevation = np.arcsin(np.clip(z_rot / r_safe, -1.0, 1.0))
 
         return np.array([azimuth, elevation], dtype=np.float64)
 
@@ -195,22 +198,25 @@ class AzimuthElevationMeasurementModel:
         # Compute intermediate values
         rho_sq = x_rot**2 + y_rot**2  # xy-plane distance squared
         r_sq = rho_sq + z_rot**2  # 3D range squared
-        rho = np.sqrt(rho_sq)  # xy-plane distance
+        min_sq = self._MIN_DENOMINATOR**2
+        rho_sq_safe = max(rho_sq, min_sq)
+        r_sq_safe = max(r_sq, min_sq)
+        rho_safe = np.sqrt(rho_sq_safe)
 
         # Jacobian of [azimuth, elevation] w.r.t. rotated coordinates [x', y', z']
         # dφ/dx' = -y'/(x'² + y'²)
         # dφ/dy' = x'/(x'² + y'²)
         # dφ/dz' = 0
-        dphi_dxrot = -y_rot / rho_sq
-        dphi_dyrot = x_rot / rho_sq
+        dphi_dxrot = -y_rot / rho_sq_safe
+        dphi_dyrot = x_rot / rho_sq_safe
         dphi_dzrot = 0.0
 
         # dθ/dx' = -x'z' / (r² · √(x'² + y'²))
         # dθ/dy' = -y'z' / (r² · √(x'² + y'²))
         # dθ/dz' = √(x'² + y'²) / r²
-        dtheta_dxrot = -x_rot * z_rot / (r_sq * rho)
-        dtheta_dyrot = -y_rot * z_rot / (r_sq * rho)
-        dtheta_dzrot = rho / r_sq
+        dtheta_dxrot = -x_rot * z_rot / (r_sq_safe * rho_safe)
+        dtheta_dyrot = -y_rot * z_rot / (r_sq_safe * rho_safe)
+        dtheta_dzrot = rho_safe / r_sq_safe
 
         # Jacobian w.r.t. rotated coordinates (2x3)
         J_rot = np.array(
@@ -278,8 +284,8 @@ class EKFUpdater3D:
         predicted_mean: NDArray[np.float64],
         predicted_covariance: NDArray[np.float64],
         measurement: NDArray[np.float64],
-        sensor_position: tuple[float, float, float] | None = None,
-        sensor_rotation: tuple[float, float] | None = None,
+        sensor_position: tuple[float, float, float] | list[float] | NDArray[np.float64] | None = None,
+        sensor_rotation: tuple[float, float] | list[float] | NDArray[np.float64] | None = None,
         kalman_gain_method: Literal["inv", "solve"] = "inv",
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Perform the EKF update step.
@@ -307,17 +313,43 @@ class EKFUpdater3D:
         z = np.asarray(measurement, dtype=np.float64).flatten()
 
         ndim = len(x_pred)
+        if ndim != self.ndim_state:
+            raise ValueError(
+                f"predicted_mean must have length {self.ndim_state}; got {ndim}"
+            )
+        if P_pred.shape != (ndim, ndim):
+            raise ValueError(
+                f"predicted_covariance must have shape {(ndim, ndim)}; got {P_pred.shape}"
+            )
+        if z.shape != (2,):
+            raise ValueError(f"measurement must have shape (2,); got {z.shape}")
 
         # Create measurement model with appropriate sensor position and rotation
+        translation_offset = (0.0, 0.0, 0.0)
+        if sensor_position is not None:
+            sensor_position_arr = np.asarray(sensor_position, dtype=np.float64).flatten()
+            if sensor_position_arr.shape != (3,):
+                raise ValueError(
+                    f"sensor_position must have shape (3,); got {sensor_position_arr.shape}"
+                )
+            translation_offset = tuple(float(v) for v in sensor_position_arr)
+
+        rotation_offset: tuple[float, float] | None = None
+        if sensor_rotation is not None:
+            sensor_rotation_arr = np.asarray(sensor_rotation, dtype=np.float64).flatten()
+            if sensor_rotation_arr.shape != (2,):
+                raise ValueError(
+                    f"sensor_rotation must have shape (2,); got {sensor_rotation_arr.shape}"
+                )
+            rotation_offset = tuple(float(v) for v in sensor_rotation_arr)
+
         if sensor_position is not None or sensor_rotation is not None:
             meas_model = AzimuthElevationMeasurementModel(
                 noise_covariance=self.noise_covariance,
                 mapping=self.mapping,
                 ndim_state=self.ndim_state,
-                translation_offset=(
-                    sensor_position if sensor_position else (0.0, 0.0, 0.0)
-                ),
-                rotation_offset=sensor_rotation,
+                translation_offset=translation_offset,
+                rotation_offset=rotation_offset,
             )
         else:
             meas_model = self.measurement_model
@@ -345,11 +377,23 @@ class EKFUpdater3D:
         # Innovation (measurement residual) with angle normalization
         innovation = normalize_angles(z - h_pred)
 
-        # Posterior mean: x_post = x_pred + K @ innovation
-        x_post = x_pred + K @ innovation
-
-        # Posterior covariance: P_post = (I - K @ H) @ P_pred
+        # Posterior covariance (Joseph form):
+        # P_post = (I - K @ H) @ P_pred @ (I - K @ H).T + K @ R @ K.T
         I = np.eye(ndim, dtype=np.float64)
-        P_post = (I - K @ H) @ P_pred
+        x_post = x_pred + K @ innovation
+        I_minus_KH = I - K @ H
+        P_post = I_minus_KH @ P_pred @ I_minus_KH.T + K @ R @ K.T
+        P_post = 0.5 * (P_post + P_post.T)
+
+        # Preserve inv as the default path, but recover with solve if
+        # numerical conditioning causes an unstable covariance.
+        min_eigenvalue = float(np.linalg.eigvalsh(P_post).min())
+        if kalman_gain_method == "inv" and min_eigenvalue < -1e-8:
+            PHt = P_pred @ H.T
+            K = np.linalg.solve(S, PHt.T).T
+            x_post = x_pred + K @ innovation
+            I_minus_KH = I - K @ H
+            P_post = I_minus_KH @ P_pred @ I_minus_KH.T + K @ R @ K.T
+            P_post = 0.5 * (P_post + P_post.T)
 
         return x_post, P_post
