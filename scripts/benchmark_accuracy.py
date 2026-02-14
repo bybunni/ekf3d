@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -14,23 +13,27 @@ from ekf3d.ekf_updater import AzimuthElevationMeasurementModel, EKFUpdater3D
 
 
 @dataclass
-class FrameTimingStats:
+class AccuracyStats:
     interval_s: float
     interval_ms: float
     frames: int
-    mean_ms: float
-    p50_ms: float
-    p95_ms: float
-    p99_ms: float
-    max_ms: float
-    miss_count: int
-    miss_rate_percent: float
-    worst_overrun_ms: float
-    mean_slack_ms: float
-    p05_slack_ms: float
-    p50_slack_ms: float
-    utilization_p95_percent: float
-    estimated_p95_headroom_hz: float
+    used_frames: int
+    pos_rmse: float
+    pos_mae: float
+    pos_p50: float
+    pos_p95: float
+    pos_p99: float
+    vel_rmse: float
+    vel_mae: float
+    vel_p50: float
+    vel_p95: float
+    vel_p99: float
+    pos_x_rmse: float
+    pos_y_rmse: float
+    pos_z_rmse: float
+    vel_x_rmse: float
+    vel_y_rmse: float
+    vel_z_rmse: float
 
 
 def _parse_interval_list(raw: str) -> list[float]:
@@ -121,14 +124,28 @@ def _sensor_pose_for_step(
     return sensor_position, sensor_rotation
 
 
-def _run_interval_benchmark(
+def _random_vector_with_norm(rng: np.random.Generator, norm: float, size: int) -> np.ndarray:
+    if norm <= 0.0:
+        return np.zeros(size, dtype=np.float64)
+    vec = rng.normal(size=size)
+    vec_norm = np.linalg.norm(vec)
+    if vec_norm == 0.0:
+        vec = np.ones(size, dtype=np.float64)
+        vec_norm = np.linalg.norm(vec)
+    return (norm / vec_norm) * vec
+
+
+def _run_interval_accuracy(
     interval_s: float,
     steps: int,
+    warmup_steps: int,
     scenario: str,
     kalman_gain_method: str,
     with_sensor_pose: bool,
     seed: int,
-) -> FrameTimingStats:
+    initial_position_error_norm: float,
+    initial_velocity_error_norm: float,
+) -> AccuracyStats:
     rng = np.random.default_rng(seed)
     predictor = EKFPredictor3D(
         noise_diff_coeff_x=0.01,
@@ -138,12 +155,17 @@ def _run_interval_benchmark(
     noise_covariance = _build_noise_covariance(scenario)
     updater = EKFUpdater3D(noise_covariance=noise_covariance)
 
-    estimate_state, estimate_covariance = _initial_state_and_covariance(scenario)
-    true_state = estimate_state.copy()
+    true_state, estimate_covariance = _initial_state_and_covariance(scenario)
+    position_bias = _random_vector_with_norm(rng, initial_position_error_norm, 3)
+    velocity_bias = _random_vector_with_norm(rng, initial_velocity_error_norm, 3)
+    estimate_state = true_state.copy()
+    estimate_state[[0, 2, 4]] += position_bias
+    estimate_state[[1, 3, 5]] += velocity_bias
+
     measurement_std = np.sqrt(np.diag(noise_covariance))
 
-    frame_durations_ns = np.empty(steps, dtype=np.int64)
-    budget_ns = interval_s * 1e9
+    pos_error_components = np.zeros((steps, 3), dtype=np.float64)
+    vel_error_components = np.zeros((steps, 3), dtype=np.float64)
 
     for step in range(steps):
         true_state, _ = predictor.predict(true_state, np.eye(6, dtype=np.float64), interval_s)
@@ -168,7 +190,6 @@ def _run_interval_benchmark(
         measurement = measurement_model.function(true_state)
         measurement = measurement + rng.normal(loc=0.0, scale=measurement_std, size=2)
 
-        frame_start_ns = time.perf_counter_ns()
         estimate_state, estimate_covariance = updater.update(
             estimate_state_pred,
             estimate_cov_pred,
@@ -177,63 +198,69 @@ def _run_interval_benchmark(
             sensor_rotation=sensor_rotation,
             kalman_gain_method=kalman_gain_method,
         )
-        frame_end_ns = time.perf_counter_ns()
-        frame_durations_ns[step] = frame_end_ns - frame_start_ns
 
-    durations_ms = frame_durations_ns.astype(np.float64) / 1e6
-    slack_ns = budget_ns - frame_durations_ns.astype(np.float64)
-    miss_mask = slack_ns < 0.0
-    miss_count = int(np.count_nonzero(miss_mask))
-    worst_overrun_ms = float(max(0.0, -slack_ns.min() / 1e6))
+        pos_error_components[step] = estimate_state[[0, 2, 4]] - true_state[[0, 2, 4]]
+        vel_error_components[step] = estimate_state[[1, 3, 5]] - true_state[[1, 3, 5]]
 
-    p95_ms = float(np.percentile(durations_ms, 95))
-    return FrameTimingStats(
+    start_index = min(max(warmup_steps, 0), steps - 1)
+    pos_error_components = pos_error_components[start_index:]
+    vel_error_components = vel_error_components[start_index:]
+    used_frames = len(pos_error_components)
+
+    pos_error_norm = np.linalg.norm(pos_error_components, axis=1)
+    vel_error_norm = np.linalg.norm(vel_error_components, axis=1)
+
+    return AccuracyStats(
         interval_s=interval_s,
         interval_ms=interval_s * 1e3,
         frames=steps,
-        mean_ms=float(np.mean(durations_ms)),
-        p50_ms=float(np.percentile(durations_ms, 50)),
-        p95_ms=p95_ms,
-        p99_ms=float(np.percentile(durations_ms, 99)),
-        max_ms=float(np.max(durations_ms)),
-        miss_count=miss_count,
-        miss_rate_percent=100.0 * miss_count / steps,
-        worst_overrun_ms=worst_overrun_ms,
-        mean_slack_ms=float(np.mean(slack_ns) / 1e6),
-        p05_slack_ms=float(np.percentile(slack_ns, 5) / 1e6),
-        p50_slack_ms=float(np.percentile(slack_ns, 50) / 1e6),
-        utilization_p95_percent=100.0 * p95_ms / (interval_s * 1e3),
-        estimated_p95_headroom_hz=(1000.0 / p95_ms) if p95_ms > 0.0 else float("inf"),
+        used_frames=used_frames,
+        pos_rmse=float(np.sqrt(np.mean(pos_error_norm**2))),
+        pos_mae=float(np.mean(np.abs(pos_error_norm))),
+        pos_p50=float(np.percentile(pos_error_norm, 50)),
+        pos_p95=float(np.percentile(pos_error_norm, 95)),
+        pos_p99=float(np.percentile(pos_error_norm, 99)),
+        vel_rmse=float(np.sqrt(np.mean(vel_error_norm**2))),
+        vel_mae=float(np.mean(np.abs(vel_error_norm))),
+        vel_p50=float(np.percentile(vel_error_norm, 50)),
+        vel_p95=float(np.percentile(vel_error_norm, 95)),
+        vel_p99=float(np.percentile(vel_error_norm, 99)),
+        pos_x_rmse=float(np.sqrt(np.mean(pos_error_components[:, 0] ** 2))),
+        pos_y_rmse=float(np.sqrt(np.mean(pos_error_components[:, 1] ** 2))),
+        pos_z_rmse=float(np.sqrt(np.mean(pos_error_components[:, 2] ** 2))),
+        vel_x_rmse=float(np.sqrt(np.mean(vel_error_components[:, 0] ** 2))),
+        vel_y_rmse=float(np.sqrt(np.mean(vel_error_components[:, 1] ** 2))),
+        vel_z_rmse=float(np.sqrt(np.mean(vel_error_components[:, 2] ** 2))),
     )
 
 
-def _print_table(stats_by_interval: list[FrameTimingStats]) -> None:
+def _print_accuracy_table(stats_by_interval: list[AccuracyStats]) -> None:
     print(
-        " interval_ms | mean_ms | p95_ms | p99_ms | miss_% | worst_overrun_ms | "
-        "mean_slack_ms | p05_slack_ms | util_p95_% | est_headroom_hz"
+        " interval_ms | pos_rmse | pos_p95 | vel_rmse | vel_p95 | "
+        "pos_axis_rmse(x,y,z) | vel_axis_rmse(x,y,z)"
     )
-    print("-" * 128)
+    print("-" * 124)
     for stats in stats_by_interval:
         print(
-            f"{stats.interval_ms:11.3f} | {stats.mean_ms:7.4f} | {stats.p95_ms:6.4f} | "
-            f"{stats.p99_ms:6.4f} | {stats.miss_rate_percent:6.3f} | "
-            f"{stats.worst_overrun_ms:16.6f} | {stats.mean_slack_ms:13.6f} | "
-            f"{stats.p05_slack_ms:12.6f} | {stats.utilization_p95_percent:10.3f} | "
-            f"{stats.estimated_p95_headroom_hz:15.2f}"
+            f"{stats.interval_ms:11.3f} | "
+            f"{stats.pos_rmse:8.4f} | {stats.pos_p95:7.4f} | "
+            f"{stats.vel_rmse:8.4f} | {stats.vel_p95:7.4f} | "
+            f"({stats.pos_x_rmse:6.3f},{stats.pos_y_rmse:6.3f},{stats.pos_z_rmse:6.3f}) | "
+            f"({stats.vel_x_rmse:6.3f},{stats.vel_y_rmse:6.3f},{stats.vel_z_rmse:6.3f})"
         )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Realtime EKF frame-time benchmark. Reports deadline miss/slack metrics "
-            "for each measurement interval."
+            "EKF accuracy benchmark. Reports state-estimation error versus "
+            "measurement interval."
         )
     )
     parser.add_argument(
         "--measurement-intervals",
         type=str,
-        default="0.033333,0.02,0.01,0.005",
+        default="0.01,0.02,0.05,0.1,0.2,0.5,1.0,2.0,5.0",
         help="comma-separated measurement intervals in seconds",
     )
     parser.add_argument("--steps", type=int, default=20000, help="frames to simulate")
@@ -245,6 +272,12 @@ def main() -> None:
             "fixed simulated duration in seconds. If set, steps are computed per interval "
             "as ceil(duration / interval)."
         ),
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=1000,
+        help="initial frames to ignore in metric aggregation",
     )
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument(
@@ -265,6 +298,18 @@ def main() -> None:
         help="include changing sensor position/orientation each frame",
     )
     parser.add_argument(
+        "--initial-position-error-norm",
+        type=float,
+        default=50.0,
+        help="norm of initial position error injected into the estimator",
+    )
+    parser.add_argument(
+        "--initial-velocity-error-norm",
+        type=float,
+        default=1.0,
+        help="norm of initial velocity error injected into the estimator",
+    )
+    parser.add_argument(
         "--json-out",
         type=Path,
         default=None,
@@ -273,28 +318,36 @@ def main() -> None:
     args = parser.parse_args()
 
     intervals = _parse_interval_list(args.measurement_intervals)
-    stats_by_interval: list[FrameTimingStats] = []
+    stats_by_interval: list[AccuracyStats] = []
     for interval_s in intervals:
         interval_steps = _resolve_steps(interval_s, args.steps, args.duration_s)
-        stats = _run_interval_benchmark(
+        stats = _run_interval_accuracy(
             interval_s=interval_s,
             steps=interval_steps,
+            warmup_steps=args.warmup_steps,
             scenario=args.scenario,
             kalman_gain_method=args.kalman_gain_method,
             with_sensor_pose=args.with_sensor_pose,
             seed=args.seed,
+            initial_position_error_norm=args.initial_position_error_norm,
+            initial_velocity_error_norm=args.initial_velocity_error_norm,
         )
         stats_by_interval.append(stats)
 
-    print("EKF Realtime Frame-Time Benchmark")
+    print("EKF Accuracy Benchmark")
     print(
         f"scenario={args.scenario} gain={args.kalman_gain_method} "
         f"sensor_pose={'on' if args.with_sensor_pose else 'off'} "
-        f"steps={'duration-based' if args.duration_s is not None else args.steps}"
+        f"steps={'duration-based' if args.duration_s is not None else args.steps} "
+        f"warmup={args.warmup_steps}"
     )
     if args.duration_s is not None:
         print(f"requested_duration_s={args.duration_s}")
-    _print_table(stats_by_interval)
+    print(
+        f"initial_position_error_norm={args.initial_position_error_norm} "
+        f"initial_velocity_error_norm={args.initial_velocity_error_norm}"
+    )
+    _print_accuracy_table(stats_by_interval)
 
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +357,10 @@ def main() -> None:
             "with_sensor_pose": args.with_sensor_pose,
             "steps": args.steps,
             "duration_s": args.duration_s,
+            "warmup_steps": args.warmup_steps,
             "seed": args.seed,
+            "initial_position_error_norm": args.initial_position_error_norm,
+            "initial_velocity_error_norm": args.initial_velocity_error_norm,
             "results": [asdict(stats) for stats in stats_by_interval],
         }
         args.json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
