@@ -410,7 +410,7 @@ Run:
 uv run --with matplotlib python scripts/benchmark_accuracy.py \
   --measurement-intervals 0.01,0.02,0.05,0.1,0.2,0.5,1.0,2.0,5.0 \
   --duration-s 300 \
-  --warmup-steps 1000 \
+  --warmup-steps 30 \
   --scenario nominal \
   --kalman-gain-method inv \
   --with-sensor-pose \
@@ -418,16 +418,22 @@ uv run --with matplotlib python scripts/benchmark_accuracy.py \
   --los-range-guess 120 \
   --los-range-std 120 \
   --los-cross-range-std 20 \
-  --process-noise-q 0.01 \
+  --process-noise-q 0.0 \
   --measurement-noise-std-rad 0.001 \
-  --json-out perf/accuracy_nominal.json \
-  --plot-dir perf/accuracy_plots
+  --json-out perf/accuracy_tuned_300s_warmup30.json \
+  --plot-dir perf/accuracy_tuned_300s_warmup30_plots
 ```
 
 This reports error metrics per interval:
 - position and velocity RMSE
 - position and velocity percentile errors (P50/P95/P99)
 - axis-wise RMSE components
+
+Tuned profile used for current comparisons:
+- `--init-mode los-anisotropic`
+- `--process-noise-q 0.0`
+- `--measurement-noise-std-rad 0.001`
+- `--warmup-steps 30` (keeps post-warmup samples for slow intervals like `2.0s` and `5.0s`)
 
 If `--plot-dir` is provided, the script writes:
 - `accuracy_summary.png` (error vs interval)
