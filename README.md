@@ -438,6 +438,6 @@ If `--plot-dir` is provided, the script writes:
 
 Key tuning knobs in `benchmark_accuracy.py`:
 - `--process-noise-q`
-- `--measurement-noise-std-rad`
+- `--measurement-noise-std-rad` (defaults to near-zero `0.001` rad)
 - `--init-mode` (`biased`, `los-isotropic`, `los-anisotropic`)
 - `--los-range-guess`, `--los-range-std`, `--los-cross-range-std`

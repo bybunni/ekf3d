@@ -681,10 +681,10 @@ def main() -> None:
     parser.add_argument(
         "--measurement-noise-std-rad",
         type=float,
-        default=None,
+        default=0.001,
         help=(
-            "override measurement noise standard deviation in radians for both "
-            "azimuth and elevation. If unset, scenario defaults are used."
+            "measurement noise standard deviation in radians for both azimuth "
+            "and elevation (default: 0.001)."
         ),
     )
     parser.add_argument(
@@ -785,8 +785,7 @@ def main() -> None:
         print(f"requested_duration_s={args.duration_s}")
     print(
         f"process_noise_q={args.process_noise_q} "
-        f"measurement_noise_std_rad="
-        f"{args.measurement_noise_std_rad if args.measurement_noise_std_rad is not None else 'scenario-default'}"
+        f"measurement_noise_std_rad={args.measurement_noise_std_rad}"
     )
     print(f"init_mode={args.init_mode}")
     if args.init_mode == "biased":
