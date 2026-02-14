@@ -19,6 +19,8 @@ Mathematical Reference:
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -278,6 +280,7 @@ class EKFUpdater3D:
         measurement: NDArray[np.float64],
         sensor_position: tuple[float, float, float] | None = None,
         sensor_rotation: tuple[float, float] | None = None,
+        kalman_gain_method: Literal["inv", "solve"] = "inv",
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Perform the EKF update step.
 
@@ -289,6 +292,9 @@ class EKFUpdater3D:
                 If None, uses (0, 0, 0).
             sensor_rotation: Sensor orientation as (pitch, yaw) in radians.
                 If None, no rotation is applied.
+            kalman_gain_method: Method used to compute Kalman gain.
+                - "inv" (default): K = P_pred @ H.T @ inv(S)
+                - "solve": Solve linear system for improved numerical robustness.
 
         Returns:
             Tuple of (posterior_mean, posterior_covariance):
@@ -324,8 +330,17 @@ class EKFUpdater3D:
         # Innovation covariance: S = H @ P_pred @ H.T + R
         S = H @ P_pred @ H.T + R
 
-        # Kalman gain: K = P_pred @ H.T @ inv(S)
-        K = P_pred @ H.T @ np.linalg.inv(S)
+        # Kalman gain
+        if kalman_gain_method == "solve":
+            PHt = P_pred @ H.T
+            K = np.linalg.solve(S, PHt.T).T
+        elif kalman_gain_method == "inv":
+            K = P_pred @ H.T @ np.linalg.inv(S)
+        else:
+            raise ValueError(
+                "kalman_gain_method must be one of {'inv', 'solve'}; "
+                f"got {kalman_gain_method!r}"
+            )
 
         # Innovation (measurement residual) with angle normalization
         innovation = normalize_angles(z - h_pred)

@@ -274,6 +274,7 @@ x_post, P_post = updater.update(
     measurement=np.array([azimuth, elevation]),  # radians
     sensor_position=(sx, sy, sz),                # where the sensor is right now
     sensor_rotation=(pitch, yaw),                # sensor orientation, or omit
+    kalman_gain_method="solve",                  # optional; default is "inv"
 )
 ```
 
@@ -283,8 +284,8 @@ x_post, P_post = updater.update(
 
 ```python
 import numpy as np
-from bearing_only.ekf_predictor import EKFPredictor3D
-from bearing_only.ekf_updater import EKFUpdater3D
+from ekf3d.ekf_predictor import EKFPredictor3D
+from ekf3d.ekf_updater import EKFUpdater3D
 
 # --- Configuration ---
 dt = 1.0  # seconds between measurements
@@ -318,7 +319,13 @@ for azimuth, elevation, sensor_pos in your_measurement_source:
 
     # Update with measurement from the sensor's current position
     z = np.array([azimuth, elevation])
-    x, P = updater.update(x, P, z, sensor_position=sensor_pos)
+    x, P = updater.update(
+        x,
+        P,
+        z,
+        sensor_position=sensor_pos,
+        kalman_gain_method="solve",  # optional; default is "inv"
+    )
 
     # x now holds the best estimate of the TARGET state, not the ownship
 ```
@@ -328,11 +335,11 @@ for azimuth, elevation, sensor_pos in your_measurement_source:
 To port the 3D EKF to another project, copy these two files:
 
 ```
-src/bearing_only/ekf_predictor.py   # EKFPredictor3D + ConstantVelocityModel + CombinedCVModel3D
-src/bearing_only/ekf_updater.py     # EKFUpdater3D + AzimuthElevationMeasurementModel + normalize_angles
+src/ekf3d/ekf_predictor.py   # EKFPredictor3D + ConstantVelocityModel + CombinedCVModel3D
+src/ekf3d/ekf_updater.py     # EKFUpdater3D + AzimuthElevationMeasurementModel + normalize_angles
 ```
 
-Both files depend only on NumPy. The 2D classes (`EKFPredictor`, `EKFUpdater`, `BearingMeasurementModel`) in the same files are independent and can be deleted if not needed.
+Both files depend only on NumPy.
 
 ## Tuning Notes
 
