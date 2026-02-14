@@ -44,8 +44,8 @@ This means the Jacobian `H` also accounts for the rotation, so the Kalman gain c
 
 ```python
 # Extract pitch and yaw from a 3x3 rotation matrix R_world_to_body
-pitch = np.arcsin(R[0, 2])
-yaw = -np.arctan2(R[1, 0], R[0, 0])   # note negation (Stone Soup convention)
+pitch = np.arcsin(R_world_to_body[0, 2])
+yaw = -np.arctan2(R_world_to_body[1, 0], R_world_to_body[0, 0])  # note negation
 ```
 
 ## Components
@@ -54,9 +54,9 @@ There are three classes, all in two files with no dependencies beyond NumPy.
 
 | Class | File | Role |
 |---|---|---|
-| `EKFPredictor3D` | `ekf_predictor.py` | Time-propagate state and covariance forward by `dt` |
-| `AzimuthElevationMeasurementModel` | `ekf_updater.py` | Convert Cartesian state to `[azimuth, elevation]` and compute the Jacobian |
-| `EKFUpdater3D` | `ekf_updater.py` | Fuse a measurement into the predicted state (owns a measurement model internally) |
+| `EKFPredictor3D` | `src/ekf3d/ekf_predictor.py` | Time-propagate state and covariance forward by `dt` |
+| `AzimuthElevationMeasurementModel` | `src/ekf3d/ekf_updater.py` | Convert Cartesian state to `[azimuth, elevation]` and compute the Jacobian |
+| `EKFUpdater3D` | `src/ekf3d/ekf_updater.py` | Fuse a measurement into the predicted state (owns a measurement model internally) |
 
 Internal pieces (you never instantiate these directly):
 
@@ -149,11 +149,35 @@ for each timestep:
     3. UPDATE   -->  x_post, P_post = updater.update(
                          x_pred, P_pred, measurement,
                          sensor_position=...,
-                         sensor_rotation=...   # omit if sensor is at origin
+                         sensor_rotation=...   # omit only if sensor axes align with world axes
                      )
 ```
 
 On the first timestep, skip the predict and pass your initial state estimate directly to the updater.
+
+## Integration Input Contract (Runtime Validation)
+
+Public API methods validate inputs at runtime and fail fast with parameter-specific messages.
+This is intentional for external simulator integrations where malformed inputs are common.
+
+- `predictor.predict(prior_mean, prior_covariance, dt)`:
+  - `prior_mean`: shape `(6,)`
+  - `prior_covariance`: shape `(6, 6)`
+  - `dt`: finite scalar, `>= 0`
+- `updater.update(predicted_mean, predicted_covariance, measurement, ...)`:
+  - `predicted_mean`: shape `(6,)`
+  - `predicted_covariance`: shape `(6, 6)`
+  - `measurement`: shape `(2,)`, `[azimuth, elevation]` in radians
+  - `sensor_position` (optional): shape `(3,)`
+  - `sensor_rotation` (optional): shape `(2,)`, `(pitch, yaw)` in radians
+  - `kalman_gain_method`: `"inv"` or `"solve"`
+- Constructor contracts:
+  - `noise_covariance`: shape `(2, 2)` and finite
+  - `mapping`: length-3 unique integer indices within `[0, ndim_state)`
+  - `ndim_state`: positive integer
+
+All numeric inputs are expected to be finite.
+Current implementation uses `assert` for these guards, so run integrations without Python optimization (`-O`) if you want validation checks active.
 
 ## What Each Component Does
 
@@ -252,7 +276,9 @@ S       = H @ P_pred @ H.T + R          # innovation covariance
 K       = P_pred @ H.T @ inv(S)         # Kalman gain (6x2)
 innov   = normalize([z - h_pred])        # angle-wrapped residual
 x_post  = x_pred + K @ innov
-P_post  = (I - K @ H) @ P_pred
+I_KH    = I - K @ H
+P_post  = I_KH @ P_pred @ I_KH.T + K @ R @ K.T
+P_post  = 0.5 * (P_post + P_post.T)     # enforce symmetry
 ```
 
 **Constructor:**
@@ -277,6 +303,8 @@ x_post, P_post = updater.update(
     kalman_gain_method="solve",                  # optional; default is "inv"
 )
 ```
+
+`kalman_gain_method="inv"` is the default path. `kalman_gain_method="solve"` avoids explicit matrix inversion. In default `"inv"` mode, the implementation may fall back to `solve` if it detects covariance instability in finite precision.
 
 `sensor_position` and `sensor_rotation` are passed per-call because the ownship is maneuvering -- its pose changes every timestep. The caller is responsible for providing the current ownship position and orientation from its own navigation solution (INS/GPS). The filter treats these as known inputs, not estimated quantities.
 
