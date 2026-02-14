@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated benchmark outputs and plots
+perf/
+plots/
