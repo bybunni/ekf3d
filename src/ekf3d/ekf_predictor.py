@@ -20,6 +20,44 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def _assert_real_scalar(name: str, value: object, *, min_value: float | None = None) -> float:
+    assert np.isscalar(value), f"{name} must be a real scalar; got type {type(value).__name__}"
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError):
+        assert False, f"{name} must be convertible to float; got {value!r}"
+    assert np.isfinite(scalar), f"{name} must be finite; got {scalar!r}"
+    if min_value is not None:
+        assert scalar >= min_value, f"{name} must be >= {min_value}; got {scalar}"
+    return scalar
+
+
+def _coerce_vector(
+    name: str, value: NDArray[np.float64] | list[float] | tuple[float, ...], length: int
+) -> NDArray[np.float64]:
+    try:
+        array = np.asarray(value, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError):
+        assert False, f"{name} must be array-like with numeric values; got {value!r}"
+    assert array.shape == (length,), f"{name} must have shape ({length},); got {array.shape}"
+    assert np.isfinite(array).all(), f"{name} must contain only finite values"
+    return array
+
+
+def _coerce_matrix(
+    name: str,
+    value: NDArray[np.float64] | list[list[float]] | tuple[tuple[float, ...], ...],
+    shape: tuple[int, int],
+) -> NDArray[np.float64]:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        assert False, f"{name} must be array-like with numeric values; got {value!r}"
+    assert array.shape == shape, f"{name} must have shape {shape}; got {array.shape}"
+    assert np.isfinite(array).all(), f"{name} must contain only finite values"
+    return array
+
+
 class ConstantVelocityModel:
     """1D constant velocity transition model.
 
@@ -44,7 +82,9 @@ class ConstantVelocityModel:
             noise_diff_coeff: Process noise diffusion coefficient (variance).
                 Controls how much the velocity can change between timesteps.
         """
-        self.noise_diff_coeff = noise_diff_coeff
+        self.noise_diff_coeff = _assert_real_scalar(
+            "noise_diff_coeff", noise_diff_coeff, min_value=0.0
+        )
 
     def transition_matrix(self, dt: float) -> NDArray[np.float64]:
         """Compute the 2x2 state transition matrix.
@@ -55,6 +95,7 @@ class ConstantVelocityModel:
         Returns:
             2x2 transition matrix F = [[1, dt], [0, 1]].
         """
+        dt = _assert_real_scalar("dt", dt, min_value=0.0)
         return np.array([[1.0, dt], [0.0, 1.0]], dtype=np.float64)
 
     def process_noise(self, dt: float) -> NDArray[np.float64]:
@@ -68,6 +109,7 @@ class ConstantVelocityModel:
         Returns:
             2x2 process noise covariance matrix Q.
         """
+        dt = _assert_real_scalar("dt", dt, min_value=0.0)
         dt2 = dt * dt
         dt3 = dt2 * dt
 
@@ -109,9 +151,15 @@ class CombinedCVModel3D:
             noise_diff_coeff_y: Process noise coefficient for y dimension.
             noise_diff_coeff_z: Process noise coefficient for z dimension.
         """
-        self.model_x = ConstantVelocityModel(noise_diff_coeff_x)
-        self.model_y = ConstantVelocityModel(noise_diff_coeff_y)
-        self.model_z = ConstantVelocityModel(noise_diff_coeff_z)
+        self.model_x = ConstantVelocityModel(
+            _assert_real_scalar("noise_diff_coeff_x", noise_diff_coeff_x, min_value=0.0)
+        )
+        self.model_y = ConstantVelocityModel(
+            _assert_real_scalar("noise_diff_coeff_y", noise_diff_coeff_y, min_value=0.0)
+        )
+        self.model_z = ConstantVelocityModel(
+            _assert_real_scalar("noise_diff_coeff_z", noise_diff_coeff_z, min_value=0.0)
+        )
 
     def transition_matrix(self, dt: float) -> NDArray[np.float64]:
         """Compute the 6x6 block-diagonal state transition matrix.
@@ -211,8 +259,9 @@ class EKFPredictor3D:
             - predicted_covariance: Predicted covariance (6, 6) matrix.
         """
         # Ensure prior_mean is a column vector for matrix operations
-        x = np.asarray(prior_mean, dtype=np.float64).flatten()
-        P = np.asarray(prior_covariance, dtype=np.float64)
+        x = _coerce_vector("prior_mean", prior_mean, length=6)
+        P = _coerce_matrix("prior_covariance", prior_covariance, shape=(6, 6))
+        dt = _assert_real_scalar("dt", dt, min_value=0.0)
 
         # Get transition matrix and process noise
         F = self.motion_model.transition_matrix(dt)

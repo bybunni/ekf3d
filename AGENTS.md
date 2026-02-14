@@ -27,6 +27,16 @@ Prefer `uv` commands so local and CI environments stay consistent.
 - Constants use `UPPER_SNAKE_CASE`.
 - Preserve core conventions: state ordering `[x, vx, y, vy, z, vz]`, measurements `[azimuth, elevation]`, angles in radians.
 
+## Defensive Programming for Public APIs
+- Treat all public method inputs as untrusted (especially when called by external simulators/integrations).
+- Add strict runtime input validation at public entry points:
+  - validate shape/dimension expectations
+  - validate numeric type coercion
+  - validate finiteness (`np.isfinite`)
+  - validate allowed enum/string options
+- Fail fast with clear, parameter-specific error messages so integration bugs are easy to diagnose.
+- Add regression tests for both valid and invalid inputs whenever public API behavior is changed.
+
 ## Testing Guidelines
 There is no committed automated test suite yet. New contributions should include tests for:
 - Prediction matrix/process-noise behavior for known `dt`.

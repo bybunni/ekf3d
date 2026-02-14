@@ -34,9 +34,73 @@ def normalize_angles(angles: NDArray[np.float64]) -> NDArray[np.float64]:
     Returns:
         Array of normalized angles in radians.
     """
-    result = np.asarray(angles, dtype=np.float64).copy()
+    try:
+        result = np.asarray(angles, dtype=np.float64).copy()
+    except (TypeError, ValueError):
+        assert False, f"angles must be array-like with numeric values; got {angles!r}"
+    assert np.isfinite(result).all(), "angles must contain only finite values"
     result = np.mod(result + np.pi, 2.0 * np.pi) - np.pi
     return result
+
+
+def _coerce_vector(name: str, value: object, length: int) -> NDArray[np.float64]:
+    try:
+        array = np.asarray(value, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError):
+        assert False, f"{name} must be array-like with numeric values; got {value!r}"
+    assert array.shape == (length,), f"{name} must have shape ({length},); got {array.shape}"
+    assert np.isfinite(array).all(), f"{name} must contain only finite values"
+    return array
+
+
+def _coerce_matrix(name: str, value: object, shape: tuple[int, int]) -> NDArray[np.float64]:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        assert False, f"{name} must be array-like with numeric values; got {value!r}"
+    assert array.shape == shape, f"{name} must have shape {shape}; got {array.shape}"
+    assert np.isfinite(array).all(), f"{name} must contain only finite values"
+    return array
+
+
+def _coerce_positive_int(name: str, value: object) -> int:
+    assert isinstance(value, (int, np.integer)) and not isinstance(
+        value, bool
+    ), f"{name} must be an integer; got {type(value).__name__}"
+    integer = int(value)
+    assert integer > 0, f"{name} must be > 0; got {integer}"
+    return integer
+
+
+def _coerce_mapping(mapping: object, ndim_state: int) -> tuple[int, int, int]:
+    assert isinstance(mapping, (tuple, list, np.ndarray)), (
+        "mapping must be a 3-element tuple/list/array of state indices; "
+        f"got {type(mapping).__name__}"
+    )
+    assert len(mapping) == 3, f"mapping must have length 3; got {len(mapping)}"
+    out: list[int] = []
+    for idx in mapping:
+        assert isinstance(idx, (int, np.integer)) and not isinstance(
+            idx, bool
+        ), f"mapping indices must be integers; got {idx!r}"
+        idx_int = int(idx)
+        assert 0 <= idx_int < ndim_state, (
+            f"mapping index {idx_int} out of bounds for ndim_state={ndim_state}"
+        )
+        out.append(idx_int)
+    assert len(set(out)) == 3, f"mapping indices must be unique; got {tuple(out)!r}"
+    return tuple(out)  # type: ignore[return-value]
+
+
+def _coerce_tuple(name: str, value: object, length: int) -> tuple[float, ...]:
+    array = _coerce_vector(name, value, length)
+    return tuple(float(v) for v in array)
+
+
+def _coerce_optional_tuple(name: str, value: object | None, length: int) -> tuple[float, ...] | None:
+    if value is None:
+        return None
+    return _coerce_tuple(name, value, length)
 
 
 class AzimuthElevationMeasurementModel:
@@ -78,8 +142,10 @@ class AzimuthElevationMeasurementModel:
         noise_covariance: NDArray[np.float64],
         mapping: tuple[int, int, int] = (0, 2, 4),
         ndim_state: int = 6,
-        translation_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        rotation_offset: tuple[float, float] | None = None,
+        translation_offset: (
+            tuple[float, float, float] | list[float] | NDArray[np.float64]
+        ) = (0.0, 0.0, 0.0),
+        rotation_offset: tuple[float, float] | list[float] | NDArray[np.float64] | None = None,
     ) -> None:
         """Initialize the azimuth-elevation measurement model.
 
@@ -94,15 +160,17 @@ class AzimuthElevationMeasurementModel:
                 For a roll-stabilized sensor (roll=0).
                 If None, no rotation is applied.
         """
-        self.noise_covariance = np.asarray(noise_covariance, dtype=np.float64)
-        self.mapping = mapping
-        self.ndim_state = ndim_state
-        self.translation_offset = translation_offset
-        self.rotation_offset = rotation_offset
+        self.ndim_state = _coerce_positive_int("ndim_state", ndim_state)
+        self.noise_covariance = _coerce_matrix("noise_covariance", noise_covariance, (2, 2))
+        self.mapping = _coerce_mapping(mapping, self.ndim_state)
+        self.translation_offset = _coerce_tuple("translation_offset", translation_offset, 3)
+        self.rotation_offset = _coerce_optional_tuple("rotation_offset", rotation_offset, 2)
 
         # Precompute rotation matrix if rotation is specified
-        if rotation_offset is not None:
-            self._rotation_matrix = self._build_rotation_matrix(rotation_offset)
+        if self.rotation_offset is not None:
+            self._rotation_matrix = self._build_rotation_matrix(
+                (self.rotation_offset[0], self.rotation_offset[1])
+            )
         else:
             self._rotation_matrix = np.eye(3, dtype=np.float64)
 
@@ -121,7 +189,7 @@ class AzimuthElevationMeasurementModel:
         Returns:
             3x3 rotation matrix.
         """
-        pitch, yaw = rotation_offset
+        pitch, yaw = _coerce_tuple("rotation_offset", rotation_offset, 2)
 
         # roty(pitch)
         cp, sp = np.cos(pitch), np.sin(pitch)
@@ -151,7 +219,7 @@ class AzimuthElevationMeasurementModel:
         Returns:
             Measurement vector [azimuth, elevation] as (2,) array.
         """
-        state = np.asarray(state, dtype=np.float64).flatten()
+        state = _coerce_vector("state", state, self.ndim_state)
 
         # Extract position and apply translation
         dx = state[self.mapping[0]] - self.translation_offset[0]
@@ -182,7 +250,7 @@ class AzimuthElevationMeasurementModel:
         Returns:
             Jacobian matrix H of shape (2, ndim_state).
         """
-        state = np.asarray(state, dtype=np.float64).flatten()
+        state = _coerce_vector("state", state, self.ndim_state)
 
         # Extract position and apply translation
         dx = state[self.mapping[0]] - self.translation_offset[0]
@@ -270,13 +338,13 @@ class EKFUpdater3D:
             mapping: Tuple of (x_index, y_index, z_index) into the state vector.
             ndim_state: Dimension of the state vector.
         """
-        self.noise_covariance = np.asarray(noise_covariance, dtype=np.float64)
-        self.mapping = mapping
-        self.ndim_state = ndim_state
+        self.ndim_state = _coerce_positive_int("ndim_state", ndim_state)
+        self.noise_covariance = _coerce_matrix("noise_covariance", noise_covariance, (2, 2))
+        self.mapping = _coerce_mapping(mapping, self.ndim_state)
         self.measurement_model = AzimuthElevationMeasurementModel(
-            noise_covariance=noise_covariance,
-            mapping=mapping,
-            ndim_state=ndim_state,
+            noise_covariance=self.noise_covariance,
+            mapping=self.mapping,
+            ndim_state=self.ndim_state,
         )
 
     def update(
@@ -307,40 +375,27 @@ class EKFUpdater3D:
             - posterior_mean: Updated state mean (6,) array.
             - posterior_covariance: Updated covariance (6, 6) matrix.
         """
-        # Ensure inputs are proper numpy arrays
-        x_pred = np.asarray(predicted_mean, dtype=np.float64).flatten()
-        P_pred = np.asarray(predicted_covariance, dtype=np.float64)
-        z = np.asarray(measurement, dtype=np.float64).flatten()
-
-        ndim = len(x_pred)
-        if ndim != self.ndim_state:
-            raise ValueError(
-                f"predicted_mean must have length {self.ndim_state}; got {ndim}"
-            )
-        if P_pred.shape != (ndim, ndim):
-            raise ValueError(
-                f"predicted_covariance must have shape {(ndim, ndim)}; got {P_pred.shape}"
-            )
-        if z.shape != (2,):
-            raise ValueError(f"measurement must have shape (2,); got {z.shape}")
+        x_pred = _coerce_vector("predicted_mean", predicted_mean, self.ndim_state)
+        P_pred = _coerce_matrix(
+            "predicted_covariance",
+            predicted_covariance,
+            (self.ndim_state, self.ndim_state),
+        )
+        z = _coerce_vector("measurement", measurement, 2)
+        assert kalman_gain_method in {"inv", "solve"}, (
+            "kalman_gain_method must be one of {'inv', 'solve'}; "
+            f"got {kalman_gain_method!r}"
+        )
 
         # Create measurement model with appropriate sensor position and rotation
         translation_offset = (0.0, 0.0, 0.0)
         if sensor_position is not None:
-            sensor_position_arr = np.asarray(sensor_position, dtype=np.float64).flatten()
-            if sensor_position_arr.shape != (3,):
-                raise ValueError(
-                    f"sensor_position must have shape (3,); got {sensor_position_arr.shape}"
-                )
+            sensor_position_arr = _coerce_vector("sensor_position", sensor_position, 3)
             translation_offset = tuple(float(v) for v in sensor_position_arr)
 
         rotation_offset: tuple[float, float] | None = None
         if sensor_rotation is not None:
-            sensor_rotation_arr = np.asarray(sensor_rotation, dtype=np.float64).flatten()
-            if sensor_rotation_arr.shape != (2,):
-                raise ValueError(
-                    f"sensor_rotation must have shape (2,); got {sensor_rotation_arr.shape}"
-                )
+            sensor_rotation_arr = _coerce_vector("sensor_rotation", sensor_rotation, 2)
             rotation_offset = tuple(float(v) for v in sensor_rotation_arr)
 
         if sensor_position is not None or sensor_rotation is not None:
@@ -358,42 +413,72 @@ class EKFUpdater3D:
         H = meas_model.jacobian(x_pred)
         h_pred = meas_model.function(x_pred)
         R = meas_model.noise_covar
+        assert np.isfinite(H).all(), "measurement Jacobian contains non-finite values"
+        assert np.isfinite(h_pred).all(), "predicted measurement contains non-finite values"
 
         # Innovation covariance: S = H @ P_pred @ H.T + R
         S = H @ P_pred @ H.T + R
+        assert np.isfinite(S).all(), "innovation covariance S contains non-finite values"
 
         # Kalman gain
         if kalman_gain_method == "solve":
             PHt = P_pred @ H.T
-            K = np.linalg.solve(S, PHt.T).T
-        elif kalman_gain_method == "inv":
-            K = P_pred @ H.T @ np.linalg.inv(S)
+            try:
+                K = np.linalg.solve(S, PHt.T).T
+            except np.linalg.LinAlgError as exc:
+                assert False, (
+                    "failed to compute Kalman gain with solve; innovation covariance "
+                    f"S may be singular or ill-conditioned ({exc})"
+                )
         else:
-            raise ValueError(
-                "kalman_gain_method must be one of {'inv', 'solve'}; "
-                f"got {kalman_gain_method!r}"
-            )
+            try:
+                K = P_pred @ H.T @ np.linalg.inv(S)
+            except np.linalg.LinAlgError as exc:
+                assert False, (
+                    "failed to compute Kalman gain with inv; innovation covariance "
+                    f"S may be singular ({exc})"
+                )
 
         # Innovation (measurement residual) with angle normalization
         innovation = normalize_angles(z - h_pred)
 
         # Posterior covariance (Joseph form):
         # P_post = (I - K @ H) @ P_pred @ (I - K @ H).T + K @ R @ K.T
-        I = np.eye(ndim, dtype=np.float64)
+        I = np.eye(self.ndim_state, dtype=np.float64)
         x_post = x_pred + K @ innovation
         I_minus_KH = I - K @ H
         P_post = I_minus_KH @ P_pred @ I_minus_KH.T + K @ R @ K.T
         P_post = 0.5 * (P_post + P_post.T)
+        assert np.isfinite(x_post).all(), "posterior state contains non-finite values"
+        assert np.isfinite(P_post).all(), "posterior covariance contains non-finite values"
 
         # Preserve inv as the default path, but recover with solve if
         # numerical conditioning causes an unstable covariance.
-        min_eigenvalue = float(np.linalg.eigvalsh(P_post).min())
+        try:
+            min_eigenvalue = float(np.linalg.eigvalsh(P_post).min())
+        except np.linalg.LinAlgError as exc:
+            assert False, (
+                "failed to compute posterior covariance eigenvalues; "
+                f"posterior covariance may be ill-conditioned ({exc})"
+            )
         if kalman_gain_method == "inv" and min_eigenvalue < -1e-8:
             PHt = P_pred @ H.T
-            K = np.linalg.solve(S, PHt.T).T
+            try:
+                K = np.linalg.solve(S, PHt.T).T
+            except np.linalg.LinAlgError as exc:
+                assert False, (
+                    "fallback Kalman gain solve failed after inv path instability; "
+                    f"S may be singular or ill-conditioned ({exc})"
+                )
             x_post = x_pred + K @ innovation
             I_minus_KH = I - K @ H
             P_post = I_minus_KH @ P_pred @ I_minus_KH.T + K @ R @ K.T
             P_post = 0.5 * (P_post + P_post.T)
+            assert np.isfinite(x_post).all(), (
+                "posterior state contains non-finite values after solve fallback"
+            )
+            assert np.isfinite(P_post).all(), (
+                "posterior covariance contains non-finite values after solve fallback"
+            )
 
         return x_post, P_post

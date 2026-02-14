@@ -95,7 +95,7 @@ def test_update_invalid_kalman_gain_method_raises() -> None:
     predicted_covariance = np.eye(6, dtype=np.float64)
     measurement = updater.measurement_model.function(predicted_mean)
 
-    with pytest.raises(ValueError, match="kalman_gain_method"):
+    with pytest.raises(AssertionError, match="kalman_gain_method"):
         updater.update(
             predicted_mean,
             predicted_covariance,
@@ -164,7 +164,7 @@ def test_update_raises_on_incorrect_measurement_shape() -> None:
     predicted_mean = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float64)
     predicted_covariance = np.eye(6, dtype=np.float64)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(AssertionError, match="measurement"):
         updater.update(predicted_mean, predicted_covariance, measurement=np.zeros(3))
 
 
@@ -174,7 +174,7 @@ def test_update_raises_on_incorrect_covariance_shape() -> None:
     bad_covariance = np.eye(5, dtype=np.float64)
     measurement = updater.measurement_model.function(predicted_mean)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(AssertionError, match="predicted_covariance"):
         updater.update(predicted_mean, bad_covariance, measurement)
 
 
