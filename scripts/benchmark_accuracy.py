@@ -75,6 +75,15 @@ def _build_noise_covariance(scenario: str) -> np.ndarray:
     return np.diag([1e-2, 1e-2]).astype(np.float64)
 
 
+def _build_noise_covariance_from_std(measurement_noise_std_rad: float) -> np.ndarray:
+    if measurement_noise_std_rad < 0.0:
+        raise ValueError(
+            f"measurement_noise_std_rad must be >= 0.0, got {measurement_noise_std_rad}"
+        )
+    variance = measurement_noise_std_rad**2
+    return np.diag([variance, variance]).astype(np.float64)
+
+
 def _initial_state_and_covariance(scenario: str) -> tuple[np.ndarray, np.ndarray]:
     if scenario == "stress":
         state = np.array([120.0, 1.0, 15.0, -0.4, 8.0, 0.2], dtype=np.float64)
@@ -137,6 +146,129 @@ def _sensor_pose_for_step(
     return sensor_position, sensor_rotation
 
 
+def _rotation_matrix_from_sensor_rotation(sensor_rotation: tuple[float, float] | None) -> np.ndarray:
+    if sensor_rotation is None:
+        return np.eye(3, dtype=np.float64)
+    return AzimuthElevationMeasurementModel._build_rotation_matrix(sensor_rotation)
+
+
+def _measurement_direction_world(
+    measurement: np.ndarray, sensor_rotation: tuple[float, float] | None
+) -> np.ndarray:
+    azimuth = float(measurement[0])
+    elevation = float(measurement[1])
+    body_direction = np.array(
+        [
+            np.cos(elevation) * np.cos(azimuth),
+            np.cos(elevation) * np.sin(azimuth),
+            np.sin(elevation),
+        ],
+        dtype=np.float64,
+    )
+    body_direction /= np.linalg.norm(body_direction)
+    rotation = _rotation_matrix_from_sensor_rotation(sensor_rotation)
+    world_direction = rotation.T @ body_direction
+    world_direction /= np.linalg.norm(world_direction)
+    return world_direction
+
+
+def _orthonormal_basis_from_primary(primary_axis: np.ndarray) -> np.ndarray:
+    u = np.asarray(primary_axis, dtype=np.float64)
+    u /= np.linalg.norm(u)
+    ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    if np.abs(np.dot(u, ref)) > 0.95:
+        ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    v = np.cross(ref, u)
+    v /= np.linalg.norm(v)
+    w = np.cross(u, v)
+    w /= np.linalg.norm(w)
+    return np.column_stack([u, v, w])
+
+
+def _initialize_from_first_measurement(
+    true_state: np.ndarray,
+    noise_covariance: np.ndarray,
+    with_sensor_pose: bool,
+    interval_s: float,
+    rng: np.random.Generator,
+    init_mode: str,
+    los_range_guess: float,
+    los_range_std: float,
+    los_cross_range_std: float,
+    los_initial_velocity_std: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if los_range_guess <= 0.0:
+        raise ValueError(f"los_range_guess must be > 0.0, got {los_range_guess}")
+    if los_range_std <= 0.0:
+        raise ValueError(f"los_range_std must be > 0.0, got {los_range_std}")
+    if los_cross_range_std <= 0.0:
+        raise ValueError(f"los_cross_range_std must be > 0.0, got {los_cross_range_std}")
+    if los_initial_velocity_std <= 0.0:
+        raise ValueError(
+            f"los_initial_velocity_std must be > 0.0, got {los_initial_velocity_std}"
+        )
+
+    sensor_position: tuple[float, float, float] | None = None
+    sensor_rotation: tuple[float, float] | None = None
+    if with_sensor_pose:
+        sensor_position, sensor_rotation = _sensor_pose_for_step(0, interval_s, true_state)
+
+    measurement_model = AzimuthElevationMeasurementModel(
+        noise_covariance=noise_covariance,
+        translation_offset=sensor_position or (0.0, 0.0, 0.0),
+        rotation_offset=sensor_rotation,
+    )
+    measurement_std = np.sqrt(np.diag(noise_covariance))
+    first_measurement = measurement_model.function(true_state)
+    first_measurement = first_measurement + rng.normal(
+        loc=0.0, scale=measurement_std, size=2
+    )
+
+    direction_world = _measurement_direction_world(first_measurement, sensor_rotation)
+    sensor_position_vec = np.asarray(sensor_position or (0.0, 0.0, 0.0), dtype=np.float64)
+    estimated_position = sensor_position_vec + los_range_guess * direction_world
+
+    estimate_state = np.array(
+        [
+            estimated_position[0],
+            0.0,
+            estimated_position[1],
+            0.0,
+            estimated_position[2],
+            0.0,
+        ],
+        dtype=np.float64,
+    )
+
+    estimate_covariance = np.zeros((6, 6), dtype=np.float64)
+    vel_var = los_initial_velocity_std**2
+    estimate_covariance[1, 1] = vel_var
+    estimate_covariance[3, 3] = vel_var
+    estimate_covariance[5, 5] = vel_var
+
+    if init_mode == "los-isotropic":
+        pos_var = los_range_std**2
+        estimate_covariance[0, 0] = pos_var
+        estimate_covariance[2, 2] = pos_var
+        estimate_covariance[4, 4] = pos_var
+    elif init_mode == "los-anisotropic":
+        basis = _orthonormal_basis_from_primary(direction_world)
+        local_cov = np.diag(
+            [los_range_std**2, los_cross_range_std**2, los_cross_range_std**2]
+        ).astype(np.float64)
+        pos_cov = basis @ local_cov @ basis.T
+        position_indices = [0, 2, 4]
+        for row_i, row_idx in enumerate(position_indices):
+            for col_i, col_idx in enumerate(position_indices):
+                estimate_covariance[row_idx, col_idx] = pos_cov[row_i, col_i]
+    else:
+        raise ValueError(
+            f"init_mode must be one of {{'los-isotropic', 'los-anisotropic'}}; got {init_mode!r}"
+        )
+
+    return estimate_state, estimate_covariance
+
+
 def _random_vector_with_norm(rng: np.random.Generator, norm: float, size: int) -> np.ndarray:
     if norm <= 0.0:
         return np.zeros(size, dtype=np.float64)
@@ -156,25 +288,58 @@ def _run_interval_accuracy(
     kalman_gain_method: str,
     with_sensor_pose: bool,
     seed: int,
+    process_noise_q: float,
+    measurement_noise_std_rad: float | None,
+    init_mode: str,
     initial_position_error_norm: float,
     initial_velocity_error_norm: float,
+    los_range_guess: float,
+    los_range_std: float,
+    los_cross_range_std: float,
+    los_initial_velocity_std: float,
     collect_trace: bool = False,
 ) -> tuple[AccuracyStats, AccuracyTrace | None]:
     rng = np.random.default_rng(seed)
+    if process_noise_q < 0.0:
+        raise ValueError(f"process_noise_q must be >= 0.0, got {process_noise_q}")
     predictor = EKFPredictor3D(
-        noise_diff_coeff_x=0.01,
-        noise_diff_coeff_y=0.01,
-        noise_diff_coeff_z=0.01,
+        noise_diff_coeff_x=process_noise_q,
+        noise_diff_coeff_y=process_noise_q,
+        noise_diff_coeff_z=process_noise_q,
     )
-    noise_covariance = _build_noise_covariance(scenario)
+    noise_covariance = (
+        _build_noise_covariance(scenario)
+        if measurement_noise_std_rad is None
+        else _build_noise_covariance_from_std(measurement_noise_std_rad)
+    )
     updater = EKFUpdater3D(noise_covariance=noise_covariance)
 
-    true_state, estimate_covariance = _initial_state_and_covariance(scenario)
-    position_bias = _random_vector_with_norm(rng, initial_position_error_norm, 3)
-    velocity_bias = _random_vector_with_norm(rng, initial_velocity_error_norm, 3)
-    estimate_state = true_state.copy()
-    estimate_state[[0, 2, 4]] += position_bias
-    estimate_state[[1, 3, 5]] += velocity_bias
+    true_state, base_covariance = _initial_state_and_covariance(scenario)
+    if init_mode == "biased":
+        estimate_covariance = base_covariance.copy()
+        position_bias = _random_vector_with_norm(rng, initial_position_error_norm, 3)
+        velocity_bias = _random_vector_with_norm(rng, initial_velocity_error_norm, 3)
+        estimate_state = true_state.copy()
+        estimate_state[[0, 2, 4]] += position_bias
+        estimate_state[[1, 3, 5]] += velocity_bias
+    elif init_mode in {"los-isotropic", "los-anisotropic"}:
+        estimate_state, estimate_covariance = _initialize_from_first_measurement(
+            true_state=true_state,
+            noise_covariance=noise_covariance,
+            with_sensor_pose=with_sensor_pose,
+            interval_s=interval_s,
+            rng=rng,
+            init_mode=init_mode,
+            los_range_guess=los_range_guess,
+            los_range_std=los_range_std,
+            los_cross_range_std=los_cross_range_std,
+            los_initial_velocity_std=los_initial_velocity_std,
+        )
+    else:
+        raise ValueError(
+            "init_mode must be one of {'biased', 'los-isotropic', 'los-anisotropic'}; "
+            f"got {init_mode!r}"
+        )
 
     measurement_std = np.sqrt(np.diag(noise_covariance))
 
@@ -508,16 +673,61 @@ def main() -> None:
         help="include changing sensor position/orientation each frame",
     )
     parser.add_argument(
+        "--process-noise-q",
+        type=float,
+        default=0.01,
+        help="process noise diffusion coefficient used for x/y/z motion models",
+    )
+    parser.add_argument(
+        "--measurement-noise-std-rad",
+        type=float,
+        default=None,
+        help=(
+            "override measurement noise standard deviation in radians for both "
+            "azimuth and elevation. If unset, scenario defaults are used."
+        ),
+    )
+    parser.add_argument(
+        "--init-mode",
+        choices=["biased", "los-isotropic", "los-anisotropic"],
+        default="biased",
+        help="estimator initialization strategy",
+    )
+    parser.add_argument(
         "--initial-position-error-norm",
         type=float,
         default=50.0,
-        help="norm of initial position error injected into the estimator",
+        help="for init-mode=biased: norm of initial position error",
     )
     parser.add_argument(
         "--initial-velocity-error-norm",
         type=float,
         default=1.0,
-        help="norm of initial velocity error injected into the estimator",
+        help="for init-mode=biased: norm of initial velocity error",
+    )
+    parser.add_argument(
+        "--los-range-guess",
+        type=float,
+        default=120.0,
+        help="for LOS init modes: initial range guess in meters",
+    )
+    parser.add_argument(
+        "--los-range-std",
+        type=float,
+        default=120.0,
+        help="for LOS init modes: range-direction position std (meters)",
+    )
+    parser.add_argument(
+        "--los-cross-range-std",
+        type=float,
+        default=20.0,
+        help="for los-anisotropic: cross-range position std (meters)",
+    )
+    parser.add_argument(
+        "--los-initial-velocity-std",
+        type=float,
+        default=1.0,
+        help="for LOS init modes: initial velocity std for vx/vy/vz",
     )
     parser.add_argument(
         "--json-out",
@@ -549,8 +759,15 @@ def main() -> None:
             kalman_gain_method=args.kalman_gain_method,
             with_sensor_pose=args.with_sensor_pose,
             seed=args.seed,
+            process_noise_q=args.process_noise_q,
+            measurement_noise_std_rad=args.measurement_noise_std_rad,
+            init_mode=args.init_mode,
             initial_position_error_norm=args.initial_position_error_norm,
             initial_velocity_error_norm=args.initial_velocity_error_norm,
+            los_range_guess=args.los_range_guess,
+            los_range_std=args.los_range_std,
+            los_cross_range_std=args.los_cross_range_std,
+            los_initial_velocity_std=args.los_initial_velocity_std,
             collect_trace=args.plot_dir is not None,
         )
         stats_by_interval.append(stats)
@@ -567,9 +784,23 @@ def main() -> None:
     if args.duration_s is not None:
         print(f"requested_duration_s={args.duration_s}")
     print(
-        f"initial_position_error_norm={args.initial_position_error_norm} "
-        f"initial_velocity_error_norm={args.initial_velocity_error_norm}"
+        f"process_noise_q={args.process_noise_q} "
+        f"measurement_noise_std_rad="
+        f"{args.measurement_noise_std_rad if args.measurement_noise_std_rad is not None else 'scenario-default'}"
     )
+    print(f"init_mode={args.init_mode}")
+    if args.init_mode == "biased":
+        print(
+            f"initial_position_error_norm={args.initial_position_error_norm} "
+            f"initial_velocity_error_norm={args.initial_velocity_error_norm}"
+        )
+    else:
+        print(
+            f"los_range_guess={args.los_range_guess} "
+            f"los_range_std={args.los_range_std} "
+            f"los_cross_range_std={args.los_cross_range_std} "
+            f"los_initial_velocity_std={args.los_initial_velocity_std}"
+        )
     _print_accuracy_table(stats_by_interval)
 
     if args.json_out is not None:
@@ -582,8 +813,15 @@ def main() -> None:
             "duration_s": args.duration_s,
             "warmup_steps": args.warmup_steps,
             "seed": args.seed,
+            "process_noise_q": args.process_noise_q,
+            "measurement_noise_std_rad": args.measurement_noise_std_rad,
+            "init_mode": args.init_mode,
             "initial_position_error_norm": args.initial_position_error_norm,
             "initial_velocity_error_norm": args.initial_velocity_error_norm,
+            "los_range_guess": args.los_range_guess,
+            "los_range_std": args.los_range_std,
+            "los_cross_range_std": args.los_cross_range_std,
+            "los_initial_velocity_std": args.los_initial_velocity_std,
             "results": [asdict(stats) for stats in stats_by_interval],
         }
         args.json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")

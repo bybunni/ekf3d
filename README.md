@@ -414,6 +414,12 @@ uv run --with matplotlib python scripts/benchmark_accuracy.py \
   --scenario nominal \
   --kalman-gain-method inv \
   --with-sensor-pose \
+  --init-mode los-anisotropic \
+  --los-range-guess 120 \
+  --los-range-std 120 \
+  --los-cross-range-std 20 \
+  --process-noise-q 0.01 \
+  --measurement-noise-std-rad 0.001 \
   --json-out perf/accuracy_nominal.json \
   --plot-dir perf/accuracy_plots
 ```
@@ -429,3 +435,9 @@ If `--plot-dir` is provided, the script writes:
   - true/estimated/ownship trajectories
   - position-error and velocity-error time-series
   - RMSE overlay on error plots
+
+Key tuning knobs in `benchmark_accuracy.py`:
+- `--process-noise-q`
+- `--measurement-noise-std-rad`
+- `--init-mode` (`biased`, `los-isotropic`, `los-anisotropic`)
+- `--los-range-guess`, `--los-range-std`, `--los-cross-range-std`
