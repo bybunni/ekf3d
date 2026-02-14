@@ -379,11 +379,12 @@ Run:
 ```bash
 uv run --group dev python scripts/benchmark_realtime.py \
   --measurement-intervals 0.033333,0.02,0.01,0.005 \
-  --steps 20000 \
+  --duration-s 300 \
   --scenario nominal \
   --kalman-gain-method inv \
   --with-sensor-pose \
-  --json-out perf/realtime_nominal.json
+  --json-out perf/realtime_nominal.json \
+  --plot-out perf/realtime_nominal.png
 ```
 
 The script reports frame-time metrics versus measurement interval (`dt`), including:
@@ -392,3 +393,39 @@ The script reports frame-time metrics versus measurement interval (`dt`), includ
 - `mean_slack_ms` / `p05_slack_ms`: margin before deadline
 - `util_p95_%`: p95 compute time as a percentage of interval budget
 - `est_headroom_hz`: approximate sustainable update rate based on p95 frame time
+
+When `--with-sensor-pose` is enabled, ownship uses a sinusoidal pursuit path around the
+moving target (stand-off + lateral weave + vertical oscillation).
+
+Use `--duration-s` when you want each interval to represent the same wall-clock simulation
+length (for example `--duration-s 300` for 5 minutes). Without it, `--steps` is used directly.
+
+If you pass `--plot-out`, the script also writes a summary latency/deadline plot.
+
+### Accuracy Benchmark (state-estimation error)
+
+Run:
+
+```bash
+uv run --with matplotlib python scripts/benchmark_accuracy.py \
+  --measurement-intervals 0.01,0.02,0.05,0.1,0.2,0.5,1.0,2.0,5.0 \
+  --duration-s 300 \
+  --warmup-steps 1000 \
+  --scenario nominal \
+  --kalman-gain-method inv \
+  --with-sensor-pose \
+  --json-out perf/accuracy_nominal.json \
+  --plot-dir perf/accuracy_plots
+```
+
+This reports error metrics per interval:
+- position and velocity RMSE
+- position and velocity percentile errors (P50/P95/P99)
+- axis-wise RMSE components
+
+If `--plot-dir` is provided, the script writes:
+- `accuracy_summary.png` (error vs interval)
+- one plot per interval with:
+  - true/estimated/ownship trajectories
+  - position-error and velocity-error time-series
+  - RMSE overlay on error plots

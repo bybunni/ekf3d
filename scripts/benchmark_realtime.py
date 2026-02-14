@@ -223,6 +223,73 @@ def _print_table(stats_by_interval: list[FrameTimingStats]) -> None:
         )
 
 
+def _import_pyplot():
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "matplotlib is required for --plot-out. "
+            "Run with: uv run --with matplotlib python scripts/benchmark_realtime.py ..."
+        ) from exc
+    return plt
+
+
+def _generate_plot(stats_by_interval: list[FrameTimingStats], plot_out: Path) -> Path:
+    plt = _import_pyplot()
+    plot_out.parent.mkdir(parents=True, exist_ok=True)
+
+    intervals_ms = np.array([stats.interval_ms for stats in stats_by_interval], dtype=np.float64)
+    mean_ms = np.array([stats.mean_ms for stats in stats_by_interval], dtype=np.float64)
+    p95_ms = np.array([stats.p95_ms for stats in stats_by_interval], dtype=np.float64)
+    p99_ms = np.array([stats.p99_ms for stats in stats_by_interval], dtype=np.float64)
+    miss_rate = np.array(
+        [stats.miss_rate_percent for stats in stats_by_interval], dtype=np.float64
+    )
+    utilization = np.array(
+        [stats.utilization_p95_percent for stats in stats_by_interval], dtype=np.float64
+    )
+
+    fig, (ax_latency, ax_deadline) = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax_latency.plot(intervals_ms, mean_ms, marker="o", label="Mean frame time")
+    ax_latency.plot(intervals_ms, p95_ms, marker="o", label="P95 frame time")
+    ax_latency.plot(intervals_ms, p99_ms, marker="o", label="P99 frame time")
+    ax_latency.plot(intervals_ms, intervals_ms, "--", label="Deadline budget")
+    ax_latency.set_xscale("log")
+    ax_latency.set_xlabel("Measurement interval (ms)")
+    ax_latency.set_ylabel("Frame time (ms)")
+    ax_latency.set_title("Realtime Latency vs Interval")
+    ax_latency.grid(True, alpha=0.3)
+    ax_latency.legend()
+
+    ax_deadline.plot(intervals_ms, miss_rate, marker="o", color="tab:red", label="Miss rate (%)")
+    ax_deadline.set_xscale("log")
+    ax_deadline.set_xlabel("Measurement interval (ms)")
+    ax_deadline.set_ylabel("Miss rate (%)", color="tab:red")
+    ax_deadline.tick_params(axis="y", labelcolor="tab:red")
+    ax_deadline.grid(True, alpha=0.3)
+
+    ax_util = ax_deadline.twinx()
+    ax_util.plot(
+        intervals_ms,
+        utilization,
+        marker="s",
+        color="tab:blue",
+        label="P95 utilization (%)",
+    )
+    ax_util.set_ylabel("P95 utilization (%)", color="tab:blue")
+    ax_util.tick_params(axis="y", labelcolor="tab:blue")
+
+    ax_deadline.set_title("Deadline Health")
+    lines, labels = ax_deadline.get_legend_handles_labels()
+    lines2, labels2 = ax_util.get_legend_handles_labels()
+    ax_deadline.legend(lines + lines2, labels + labels2, loc="upper left")
+
+    fig.tight_layout()
+    fig.savefig(plot_out, dpi=180)
+    return plot_out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -270,6 +337,12 @@ def main() -> None:
         default=None,
         help="optional JSON output path for automated comparisons",
     )
+    parser.add_argument(
+        "--plot-out",
+        type=Path,
+        default=None,
+        help="optional plot output path (PNG). Requires matplotlib.",
+    )
     args = parser.parse_args()
 
     intervals = _parse_interval_list(args.measurement_intervals)
@@ -309,6 +382,10 @@ def main() -> None:
         }
         args.json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"Wrote JSON results to {args.json_out}")
+
+    if args.plot_out is not None:
+        out_path = _generate_plot(stats_by_interval, args.plot_out)
+        print(f"Wrote plot to {out_path}")
 
 
 if __name__ == "__main__":
