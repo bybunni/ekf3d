@@ -348,3 +348,47 @@ Both files depend only on NumPy.
 **Measurement noise (`noise_covariance`)**: Set to the sensor's stated accuracy. This is `R` in the EKF equations.
 
 **Initial covariance (`P`)**: Set diagonal entries large enough to cover your uncertainty in the initial state. Typical values are 100-10000 depending on units and how rough your initial estimate is.
+
+## Performance Testing
+
+Performance tests are opt-in so normal unit test runs stay fast.
+
+### Microbenchmarks (predict/update latency)
+
+Run:
+
+```bash
+mkdir -p perf && uv run --group dev pytest --runperf tests/perf --benchmark-only \
+  --benchmark-min-rounds=20 \
+  --benchmark-json perf/microbench.json
+```
+
+This measures:
+- `EKFPredictor3D.predict()` latency
+- `EKFUpdater3D.update()` latency across:
+  - nominal
+  - near-singularity
+  - stress covariance
+  - with/without sensor pose transforms
+  - `kalman_gain_method="inv"` and `"solve"`
+
+### Realtime Frame-Time Benchmark (deadline analysis)
+
+Run:
+
+```bash
+uv run --group dev python scripts/benchmark_realtime.py \
+  --measurement-intervals 0.033333,0.02,0.01,0.005 \
+  --steps 20000 \
+  --scenario nominal \
+  --kalman-gain-method inv \
+  --with-sensor-pose \
+  --json-out perf/realtime_nominal.json
+```
+
+The script reports frame-time metrics versus measurement interval (`dt`), including:
+- `miss_%`: percentage of frames that exceed the measurement deadline
+- `worst_overrun_ms`: maximum deadline miss
+- `mean_slack_ms` / `p05_slack_ms`: margin before deadline
+- `util_p95_%`: p95 compute time as a percentage of interval budget
+- `est_headroom_hz`: approximate sustainable update rate based on p95 frame time

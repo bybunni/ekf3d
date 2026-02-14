@@ -13,7 +13,13 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest-benchmark>=5.1.0",
     "pytest>=9.0.0",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "perf: performance benchmarks (run with --runperf)",
 ]
 
 [build-system]
