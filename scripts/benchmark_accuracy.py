@@ -68,6 +68,8 @@ def _resolve_steps(interval_s: float, steps: int, duration_s: float | None) -> i
 
 
 def _build_noise_covariance(scenario: str) -> np.ndarray:
+    if scenario == "long_range":
+        return np.diag([1e-6, 1e-6]).astype(np.float64)  # 0.001 rad std
     if scenario == "stress":
         return np.diag([1e-12, 1e-12]).astype(np.float64)
     if scenario == "near_singularity":
@@ -91,6 +93,9 @@ def _initial_state_and_covariance(scenario: str) -> tuple[np.ndarray, np.ndarray
     elif scenario == "near_singularity":
         state = np.array([1e-6, 0.1, -1e-6, -0.1, 20.0, 0.1], dtype=np.float64)
         covariance = np.diag([1.0, 0.2, 1.0, 0.2, 2.0, 0.2]).astype(np.float64)
+    elif scenario == "long_range":
+        state = np.array([150_000.0, 280.0, 25_000.0, 80.0, 12_000.0, -60.0], dtype=np.float64)
+        covariance = np.diag([1e8, 1e4, 1e8, 1e4, 1e8, 1e4]).astype(np.float64)
     else:
         state = np.array([150.0, 1.5, -25.0, 0.6, 12.0, -0.3], dtype=np.float64)
         covariance = np.diag([10.0, 2.0, 10.0, 2.0, 8.0, 1.5]).astype(np.float64)
@@ -98,7 +103,7 @@ def _initial_state_and_covariance(scenario: str) -> tuple[np.ndarray, np.ndarray
 
 
 def _sensor_pose_for_step(
-    step: int, dt: float, target_state: np.ndarray
+    step: int, dt: float, target_state: np.ndarray, scenario: str = "nominal"
 ) -> tuple[tuple[float, float, float], tuple[float, float]]:
     """Generate a sinusoidal pursuit trajectory around the moving target."""
     t = step * dt
@@ -119,11 +124,18 @@ def _sensor_pose_for_step(
         lateral = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
     up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    standoff_distance = 120.0
-    lateral_amplitude = 30.0
-    vertical_base = 8.0
-    vertical_amplitude = 6.0
-    weave_frequency = 0.15
+    if scenario == "long_range":
+        standoff_distance = 40_000.0
+        lateral_amplitude = 30_000.0
+        vertical_base = 8_000.0
+        vertical_amplitude = 6_000.0
+        weave_frequency = 0.005
+    else:
+        standoff_distance = 120.0
+        lateral_amplitude = 30.0
+        vertical_base = 8.0
+        vertical_amplitude = 6.0
+        weave_frequency = 0.15
 
     offset = (
         -standoff_distance * forward
@@ -196,6 +208,7 @@ def _initialize_from_first_measurement(
     los_range_std: float,
     los_cross_range_std: float,
     los_initial_velocity_std: float,
+    scenario: str = "nominal",
 ) -> tuple[np.ndarray, np.ndarray]:
     if los_range_guess <= 0.0:
         raise ValueError(f"los_range_guess must be > 0.0, got {los_range_guess}")
@@ -211,7 +224,7 @@ def _initialize_from_first_measurement(
     sensor_position: tuple[float, float, float] | None = None
     sensor_rotation: tuple[float, float] | None = None
     if with_sensor_pose:
-        sensor_position, sensor_rotation = _sensor_pose_for_step(0, interval_s, true_state)
+        sensor_position, sensor_rotation = _sensor_pose_for_step(0, interval_s, true_state, scenario)
 
     measurement_model = AzimuthElevationMeasurementModel(
         noise_covariance=noise_covariance,
@@ -334,6 +347,7 @@ def _run_interval_accuracy(
             los_range_std=los_range_std,
             los_cross_range_std=los_cross_range_std,
             los_initial_velocity_std=los_initial_velocity_std,
+            scenario=scenario,
         )
     else:
         raise ValueError(
@@ -369,7 +383,7 @@ def _run_interval_accuracy(
         sensor_rotation: tuple[float, float] | None = None
         if with_sensor_pose:
             sensor_position, sensor_rotation = _sensor_pose_for_step(
-                step, interval_s, true_state
+                step, interval_s, true_state, scenario
             )
 
         measurement_model = AzimuthElevationMeasurementModel(
@@ -657,7 +671,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument(
         "--scenario",
-        choices=["nominal", "near_singularity", "stress"],
+        choices=["nominal", "near_singularity", "stress", "long_range"],
         default="nominal",
         help="state/covariance operating regime",
     )
