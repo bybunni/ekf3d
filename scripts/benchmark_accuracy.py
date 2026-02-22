@@ -86,6 +86,22 @@ def _build_noise_covariance_from_std(measurement_noise_std_rad: float) -> np.nda
     return np.diag([variance, variance]).astype(np.float64)
 
 
+def _los_defaults_for_scenario(scenario: str) -> dict[str, float]:
+    if scenario == "long_range":
+        return {
+            "los_range_guess": 45_000.0,
+            "los_range_std": 50_000.0,
+            "los_cross_range_std": 5_000.0,
+            "los_initial_velocity_std": 100.0,
+        }
+    return {
+        "los_range_guess": 120.0,
+        "los_range_std": 120.0,
+        "los_cross_range_std": 20.0,
+        "los_initial_velocity_std": 1.0,
+    }
+
+
 def _initial_state_and_covariance(scenario: str) -> tuple[np.ndarray, np.ndarray]:
     if scenario == "stress":
         state = np.array([120.0, 1.0, 15.0, -0.4, 8.0, 0.2], dtype=np.float64)
@@ -722,26 +738,26 @@ def main() -> None:
     parser.add_argument(
         "--los-range-guess",
         type=float,
-        default=120.0,
-        help="for LOS init modes: initial range guess in meters",
+        default=None,
+        help="for LOS init modes: initial range guess in meters (default: scenario-dependent)",
     )
     parser.add_argument(
         "--los-range-std",
         type=float,
-        default=120.0,
-        help="for LOS init modes: range-direction position std (meters)",
+        default=None,
+        help="for LOS init modes: range-direction position std in meters (default: scenario-dependent)",
     )
     parser.add_argument(
         "--los-cross-range-std",
         type=float,
-        default=20.0,
-        help="for los-anisotropic: cross-range position std (meters)",
+        default=None,
+        help="for los-anisotropic: cross-range position std in meters (default: scenario-dependent)",
     )
     parser.add_argument(
         "--los-initial-velocity-std",
         type=float,
-        default=1.0,
-        help="for LOS init modes: initial velocity std for vx/vy/vz",
+        default=None,
+        help="for LOS init modes: initial velocity std for vx/vy/vz (default: scenario-dependent)",
     )
     parser.add_argument(
         "--json-out",
@@ -759,6 +775,16 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    los_defaults = _los_defaults_for_scenario(args.scenario)
+    if args.los_range_guess is None:
+        args.los_range_guess = los_defaults["los_range_guess"]
+    if args.los_range_std is None:
+        args.los_range_std = los_defaults["los_range_std"]
+    if args.los_cross_range_std is None:
+        args.los_cross_range_std = los_defaults["los_cross_range_std"]
+    if args.los_initial_velocity_std is None:
+        args.los_initial_velocity_std = los_defaults["los_initial_velocity_std"]
 
     intervals = _parse_interval_list(args.measurement_intervals)
     stats_by_interval: list[AccuracyStats] = []
