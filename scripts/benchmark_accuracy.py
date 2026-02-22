@@ -93,12 +93,14 @@ def _los_defaults_for_scenario(scenario: str) -> dict[str, float]:
             "los_range_std": 50_000.0,
             "los_cross_range_std": 5_000.0,
             "los_initial_velocity_std": 100.0,
+            "los_airspeed_guess": 300.0,
         }
     return {
         "los_range_guess": 120.0,
         "los_range_std": 120.0,
         "los_cross_range_std": 20.0,
         "los_initial_velocity_std": 1.0,
+        "los_airspeed_guess": 2.0,
     }
 
 
@@ -213,7 +215,7 @@ def _orthonormal_basis_from_primary(primary_axis: np.ndarray) -> np.ndarray:
     return np.column_stack([u, v, w])
 
 
-def _initialize_from_first_measurement(
+def _initialize_from_two_measurements(
     true_state: np.ndarray,
     noise_covariance: np.ndarray,
     with_sensor_pose: bool,
@@ -224,6 +226,7 @@ def _initialize_from_first_measurement(
     los_range_std: float,
     los_cross_range_std: float,
     los_initial_velocity_std: float,
+    los_airspeed_guess: float,
     scenario: str = "nominal",
 ) -> tuple[np.ndarray, np.ndarray]:
     if los_range_guess <= 0.0:
@@ -236,39 +239,81 @@ def _initialize_from_first_measurement(
         raise ValueError(
             f"los_initial_velocity_std must be > 0.0, got {los_initial_velocity_std}"
         )
+    if los_airspeed_guess < 0.0:
+        raise ValueError(f"los_airspeed_guess must be >= 0.0, got {los_airspeed_guess}")
 
-    sensor_position: tuple[float, float, float] | None = None
-    sensor_rotation: tuple[float, float] | None = None
-    if with_sensor_pose:
-        sensor_position, sensor_rotation = _sensor_pose_for_step(0, interval_s, true_state, scenario)
-
-    measurement_model = AzimuthElevationMeasurementModel(
-        noise_covariance=noise_covariance,
-        translation_offset=sensor_position or (0.0, 0.0, 0.0),
-        rotation_offset=sensor_rotation,
-    )
     measurement_std = np.sqrt(np.diag(noise_covariance))
-    first_measurement = measurement_model.function(true_state)
-    first_measurement = first_measurement + rng.normal(
-        loc=0.0, scale=measurement_std, size=2
-    )
 
-    direction_world = _measurement_direction_world(first_measurement, sensor_rotation)
-    sensor_position_vec = np.asarray(sensor_position or (0.0, 0.0, 0.0), dtype=np.float64)
-    estimated_position = sensor_position_vec + los_range_guess * direction_world
+    # --- Measurement 0 ---
+    sensor_position_0: tuple[float, float, float] | None = None
+    sensor_rotation_0: tuple[float, float] | None = None
+    if with_sensor_pose:
+        sensor_position_0, sensor_rotation_0 = _sensor_pose_for_step(
+            0, interval_s, true_state, scenario
+        )
+
+    measurement_model_0 = AzimuthElevationMeasurementModel(
+        noise_covariance=noise_covariance,
+        translation_offset=sensor_position_0 or (0.0, 0.0, 0.0),
+        rotation_offset=sensor_rotation_0,
+    )
+    meas_0 = measurement_model_0.function(true_state)
+    meas_0 = meas_0 + rng.normal(loc=0.0, scale=measurement_std, size=2)
+
+    dir_0 = _measurement_direction_world(meas_0, sensor_rotation_0)
+    sensor_pos_vec_0 = np.asarray(sensor_position_0 or (0.0, 0.0, 0.0), dtype=np.float64)
+    pos_guess_1 = sensor_pos_vec_0 + los_range_guess * dir_0
+
+    # --- Propagate true state one step (constant velocity) ---
+    true_state_1 = true_state.copy()
+    true_state_1[0] += true_state[1] * interval_s  # x += vx*dt
+    true_state_1[2] += true_state[3] * interval_s  # y += vy*dt
+    true_state_1[4] += true_state[5] * interval_s  # z += vz*dt
+
+    # --- Measurement 1 ---
+    sensor_position_1: tuple[float, float, float] | None = None
+    sensor_rotation_1: tuple[float, float] | None = None
+    if with_sensor_pose:
+        sensor_position_1, sensor_rotation_1 = _sensor_pose_for_step(
+            1, interval_s, true_state_1, scenario
+        )
+
+    measurement_model_1 = AzimuthElevationMeasurementModel(
+        noise_covariance=noise_covariance,
+        translation_offset=sensor_position_1 or (0.0, 0.0, 0.0),
+        rotation_offset=sensor_rotation_1,
+    )
+    meas_1 = measurement_model_1.function(true_state_1)
+    meas_1 = meas_1 + rng.normal(loc=0.0, scale=measurement_std, size=2)
+
+    dir_1 = _measurement_direction_world(meas_1, sensor_rotation_1)
+    sensor_pos_vec_1 = np.asarray(sensor_position_1 or (0.0, 0.0, 0.0), dtype=np.float64)
+    pos_guess_2 = sensor_pos_vec_1 + los_range_guess * dir_1
+
+    # --- Position estimate = pos_guess_2 ---
+    estimated_position = pos_guess_2
+
+    # --- Velocity estimate from displacement direction ---
+    displacement = pos_guess_2 - pos_guess_1
+    displacement_norm = float(np.linalg.norm(displacement))
+    if displacement_norm > 1e-12:
+        estimated_velocity = los_airspeed_guess * (displacement / displacement_norm)
+    else:
+        estimated_velocity = np.zeros(3, dtype=np.float64)
 
     estimate_state = np.array(
         [
             estimated_position[0],
-            0.0,
+            estimated_velocity[0],
             estimated_position[1],
-            0.0,
+            estimated_velocity[1],
             estimated_position[2],
-            0.0,
+            estimated_velocity[2],
         ],
         dtype=np.float64,
     )
 
+    # --- Covariance: anisotropic aligned with dir_1, isotropic velocity ---
     estimate_covariance = np.zeros((6, 6), dtype=np.float64)
     vel_var = los_initial_velocity_std**2
     estimate_covariance[1, 1] = vel_var
@@ -281,7 +326,7 @@ def _initialize_from_first_measurement(
         estimate_covariance[2, 2] = pos_var
         estimate_covariance[4, 4] = pos_var
     elif init_mode == "los-anisotropic":
-        basis = _orthonormal_basis_from_primary(direction_world)
+        basis = _orthonormal_basis_from_primary(dir_1)
         local_cov = np.diag(
             [los_range_std**2, los_cross_range_std**2, los_cross_range_std**2]
         ).astype(np.float64)
@@ -326,6 +371,7 @@ def _run_interval_accuracy(
     los_range_std: float,
     los_cross_range_std: float,
     los_initial_velocity_std: float,
+    los_airspeed_guess: float,
     collect_trace: bool = False,
 ) -> tuple[AccuracyStats, AccuracyTrace | None]:
     rng = np.random.default_rng(seed)
@@ -352,7 +398,7 @@ def _run_interval_accuracy(
         estimate_state[[0, 2, 4]] += position_bias
         estimate_state[[1, 3, 5]] += velocity_bias
     elif init_mode in {"los-isotropic", "los-anisotropic"}:
-        estimate_state, estimate_covariance = _initialize_from_first_measurement(
+        estimate_state, estimate_covariance = _initialize_from_two_measurements(
             true_state=true_state,
             noise_covariance=noise_covariance,
             with_sensor_pose=with_sensor_pose,
@@ -363,6 +409,7 @@ def _run_interval_accuracy(
             los_range_std=los_range_std,
             los_cross_range_std=los_cross_range_std,
             los_initial_velocity_std=los_initial_velocity_std,
+            los_airspeed_guess=los_airspeed_guess,
             scenario=scenario,
         )
     else:
@@ -760,6 +807,12 @@ def main() -> None:
         help="for LOS init modes: initial velocity std for vx/vy/vz (default: scenario-dependent)",
     )
     parser.add_argument(
+        "--los-airspeed-guess",
+        type=float,
+        default=None,
+        help="for LOS init modes: initial airspeed guess in m/s (default: scenario-dependent)",
+    )
+    parser.add_argument(
         "--json-out",
         type=Path,
         default=None,
@@ -785,6 +838,8 @@ def main() -> None:
         args.los_cross_range_std = los_defaults["los_cross_range_std"]
     if args.los_initial_velocity_std is None:
         args.los_initial_velocity_std = los_defaults["los_initial_velocity_std"]
+    if args.los_airspeed_guess is None:
+        args.los_airspeed_guess = los_defaults["los_airspeed_guess"]
 
     intervals = _parse_interval_list(args.measurement_intervals)
     stats_by_interval: list[AccuracyStats] = []
@@ -808,6 +863,7 @@ def main() -> None:
             los_range_std=args.los_range_std,
             los_cross_range_std=args.los_cross_range_std,
             los_initial_velocity_std=args.los_initial_velocity_std,
+            los_airspeed_guess=args.los_airspeed_guess,
             collect_trace=args.plot_dir is not None,
         )
         stats_by_interval.append(stats)
@@ -838,7 +894,8 @@ def main() -> None:
             f"los_range_guess={args.los_range_guess} "
             f"los_range_std={args.los_range_std} "
             f"los_cross_range_std={args.los_cross_range_std} "
-            f"los_initial_velocity_std={args.los_initial_velocity_std}"
+            f"los_initial_velocity_std={args.los_initial_velocity_std} "
+            f"los_airspeed_guess={args.los_airspeed_guess}"
         )
     _print_accuracy_table(stats_by_interval)
 
@@ -861,6 +918,7 @@ def main() -> None:
             "los_range_std": args.los_range_std,
             "los_cross_range_std": args.los_cross_range_std,
             "los_initial_velocity_std": args.los_initial_velocity_std,
+            "los_airspeed_guess": args.los_airspeed_guess,
             "results": [asdict(stats) for stats in stats_by_interval],
         }
         args.json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
