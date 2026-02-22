@@ -129,7 +129,7 @@ def _sensor_pose_for_step(
         lateral_amplitude = 30_000.0
         vertical_base = 8_000.0
         vertical_amplitude = 6_000.0
-        weave_frequency = 0.005
+        weave_frequency = 0.01
     else:
         standoff_distance = 120.0
         lateral_amplitude = 30.0
